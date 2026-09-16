@@ -1,0 +1,8 @@
+{
+  "name": "AIR Web Player",
+  "short_name": "AIR",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#090b10",
+  "theme_color": "#0d1016"
+}

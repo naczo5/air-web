@@ -1,0 +1,29 @@
+# Proprietary originals and ALL generated/decoded content (never publish).
+AIR_SE/
+.air-web-assets/
+dist/
+dist-game/
+release/
+asset-report.json
+manifest.json
+*.g00
+*.pdt
+*.nwa
+*.ogg
+*.wav
+*.exe
+*.dll
+SEEN.txt
+GAMEEXE.INI
+
+# Dependencies, local configuration, and QA artifacts.
+node_modules/
+.env
+.env.*
+!.env.example
+*.log
+playwright-report/
+test-results/
+coverage/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,45 @@
+{
+  "name": "air-se-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "prepare:air": "tsx tools/air/prepare.ts",
+    "dev": "vite",
+    "build": "vite build --mode demo",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "dev:demo": "vite --mode demo",
+    "build:game": "npm run prepare:air && vite build --mode game",
+    "preview:game": "vite preview --mode game",
+    "check": "npm run typecheck && npm test && npm run build",
+    "release:source": "node tools/release/source.mjs",
+    "release:check": "node tools/release/check.mjs",
+    "test:e2e": "node tools/release/browser-test.mjs",
+    "test:e2e:game": "node tools/release/browser-test.mjs --game"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "6.0.4",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "vite": "8.1.5"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@types/node": "26.1.1",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "fake-indexeddb": "6.2.5",
+    "jsdom": "30.0.0",
+    "tsx": "4.23.1",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11"
+  },
+  "description": "Experimental AIR Standard Edition browser player; bring your own game data",
+  "engines": {
+    "node": ">=22.22.2"
+  },
+  "license": "MIT"
+}
