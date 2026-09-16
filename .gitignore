@@ -3,7 +3,7 @@ AIR_SE/
 .air-web-assets/
 dist/
 dist-game/
-release/
+/release/
 asset-report.json
 manifest.json
 *.g00
