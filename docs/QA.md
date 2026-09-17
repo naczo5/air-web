@@ -1,14 +1,14 @@
-# QA status — 2026-09-16
+# QA status — 2026-09-17
 
 This is an experimental prerelease, **not a claim of perfect engine compatibility**.
 
 ## Verified locally
 
-- TypeScript typecheck passes.
-- 71 unit/component/integration tests pass with the local real manifest. Coverage includes bytecode/format helpers, UI text advancement, settings hydration, malformed save rejection, runtime concurrency/cancellation, and selected real-game scenes.
-- The production Playwright regression passes on system Edge with real game data and with the synthetic demo, served at `/qa/` to exercise subpath deployment. It asserts actual dialogue advancement, two History entries, save/reload/Continue, title/menu cleanup, and flowchart opening. The demo also asserts choice selection. Console errors fail this test.
+- TypeScript typecheck passes (re-verified 2026-09-17).
+- 71 unit/component/integration tests pass with the local real manifest (re-verified 2026-09-17). Coverage includes bytecode/format helpers, UI text advancement, settings hydration, malformed save rejection, runtime concurrency/cancellation, and selected real-game scenes.
+- The production Playwright regression passes on system Edge with the synthetic demo, served at `/qa/` to exercise subpath deployment (re-verified 2026-09-17; the environment's Playwright Chromium 1243 headless shell was not fully downloaded, so Edge was used via `AIR_BROWSER_CHANNEL=msedge` as documented). It asserts actual dialogue advancement, two History entries, save/reload/Continue, title/menu cleanup, and flowchart opening. The demo also asserts choice selection. Console errors fail this test.
 - Earlier exploratory browser checks reached and selected a real story choice without console/network errors. Those checks were less rigorous than the checked-in regression and are not full route coverage.
-- Dependency audit was brought to zero known vulnerabilities at preparation time by updating nanoid transitively and Vitest to 4.1.11. Audit again before publication.
+- Dependency audit shows zero known vulnerabilities (re-verified 2026-09-17).
 - Default builds exclude generated game data even when it exists locally. The source exporter copies only reviewed source roots and generates SHA-256 inventory.
 
 ## Reproduce
