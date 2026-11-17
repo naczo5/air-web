@@ -6,6 +6,7 @@ import { decodeG00, decodeNwaToWav, decodePdt, encodePngRgba, fileSummary, parse
 import { decompressRealLiveScene, extractRealLiveControls, extractRealLiveResources, extractRealLiveSceneJumps, extractRealLiveTexts, extractRealLiveTitle, extractRealLiveVoices } from "./reallive";
 import { imageLayerForResource } from "./resourceRoles";
 import { parseRealLiveBytecode } from "./bytecode";
+import { buildFlowchart, dedupeEdges } from "./flowchart";
 import type { AssetManifest, FlowchartManifest, GameManifest, SceneProgram } from "../../src/types";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -103,7 +104,6 @@ async function main() {
   }
 
   const scenes: Record<string, SceneProgram> = {};
-  const flowchart: FlowchartManifest = { nodes: [], edges: [] };
   const startScene = Number.parseInt((ini.SEEN_START ?? "9030").replace(/[^0-9]/g, ""), 10) || 9030;
   const sceneJumpMap = new Map<number, number[]>();
   for (const entry of seenEntries) {
@@ -157,37 +157,17 @@ async function main() {
       instructions,
       entrypoints: parsed.entrypoints,
     };
-    const sceneNodeId = `${sceneId}:scene`;
-    flowchart.nodes.push({ id: sceneNodeId, sceneId, instruction: 0, label: scenes[sceneId].title ?? sceneId });
-    const localStrings = new Map<string, string>();
-    instructions.forEach((instruction, instructionIndex) => {
-      if (instruction.op === "command" && instruction.moduleType === 1 && instruction.module === 10 && instruction.opcode === 0) {
-        const dest = instruction.args[0];
-        if (dest?.kind === "expression" && dest.value?.kind === "memory") {
-          const bank = dest.value.bank;
-          const idx = dest.value.index?.kind === "int" ? dest.value.index.value : -1;
-          const val = instruction.args[1]?.kind === "string" ? instruction.args[1].value : "";
-          if (bank >= 0 && idx >= 0 && val) localStrings.set(`${bank}:${idx}`, val);
-        }
-      }
-      if (instruction.op !== "choice" && instruction.op !== "select") return;
-      const choiceNodeId = `${sceneId}:choice:${instructionIndex}`;
-      flowchart.nodes.push({ id: choiceNodeId, sceneId, instruction: instructionIndex, label: "CHOICE" });
-      const optionsText = instruction.op === "choice"
-        ? instruction.options.join(" / ")
-        : instruction.options.map((option) => {
-            if (option.text) return option.text;
-            if (option.textExpression?.kind === "memory") {
-              const bank = option.textExpression.bank;
-              const idx = option.textExpression.index?.kind === "int" ? option.textExpression.index.value : -1;
-              const resolved = localStrings.get(`${bank}:${idx}`);
-              if (resolved) return resolved;
-            }
-            return "Option";
-          }).join(" / ");
-      flowchart.edges.push({ from: sceneNodeId, to: choiceNodeId, label: optionsText });
-    });
   }
+
+  // The chart is derived from the programs themselves. It carries scene ->
+  // scene exits, per-scene dates, one node per selection with its real option
+  // text, the arc each node is reachable from, and a backdrop thumbnail name,
+  // so it matches the bytecode instead of a hand-curated tree.
+  const derived = buildFlowchart(scenes, {
+    // A node may only carry a thumbnail name the manifest can actually serve.
+    isImageName: (name) => Boolean(assetAliases[name.toUpperCase()]),
+  });
+  const flowchart: FlowchartManifest = { nodes: derived.nodes, edges: dedupeEdges(derived.edges) };
 
   if (!Object.keys(scenes).length) {
     scenes.demo = { id: "demo", title: "AIR", instructions: [{ op: "text", text: "AIR asset preparation completed, but no preview scene was generated." }, { op: "end" }] };

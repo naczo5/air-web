@@ -34,6 +34,7 @@ const waitState = (overrides: Partial<RuntimeState> = {}): RuntimeState => ({
   selectionHistory: [],
   viewedAssets: [],
   graphicsBuffers: {},
+  objects: {},
   storeRegister: 0,
   ...overrides,
 });

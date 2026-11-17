@@ -2,7 +2,13 @@
 
 An **experimental**, unofficial AIR Standard Edition browser player built with React and TypeScript. Bring your own compatible game data. This repository and the default build contain **no game assets**.
 
-Includes a RealLive bytecode reader/runtime, G00/PDT image and NWA audio conversion, text and choices, save/load and JSON export/import, history, skip modes, gallery, and a story flowchart. It is not a complete or pixel-perfect replacement for the original engine. See [QA status and limitations](docs/QA.md).
+Includes a RealLive bytecode reader/runtime, G00/PDT image and NWA audio conversion, text and choices, save/load with autosave and JSON export/import, history, skip modes, gallery, and a story flowchart. It is not a complete or pixel-perfect replacement for the original engine. See [QA status and limitations](docs/QA.md).
+
+![Early scene in the web player: Misuzu at the Kamio house, with the original date badge](docs/preview.webp)
+
+*Early preview captured from the author's own legally-owned build. The repository
+distributes no game data or asset files; this promotional screenshot is the only
+game-derived image, is never loaded by the engine, and is not part of any build.*
 
 ## Try the asset-free demo
 
@@ -56,15 +62,27 @@ npm run preview:game
 
 This writes `dist-game/`. **Do not publish `dist-game/` to the source repository or attach it to a source-only GitHub release.** A manifest contains dialogue and decoded scripts, so excluding only images/audio is insufficient. Original EXE/DLL files and the local asset report are not copied into the game build.
 
+For a packed deployment, run:
+
+```sh
+npm run pack:air
+npm run pack:air:check
+```
+
+`dist-pack/` groups the media into a few hundred byte-range archives and splits the 128 MB story manifest into a small bootstrap, a compressed index, and per-scene files. It is also private and gitignored; see [Hosting](docs/HOSTING.md) for assembly and cache rules.
+
 ## Controls and saves
 
 - Click the upper game stage or press Enter/Space: reveal text, then advance.
 - Click a choice to select it. Tab/Enter activate focused buttons normally.
-- Escape: open/close menu; H/PageUp: history.
+- Escape or right-click: open/close menu. H/PageUp: history.
+- F5 quick saves to one rolling snapshot; F9 loads it. Quick save never touches the numbered slots.
 - Hold Control over the game stage, or use Skip All / Skip Read. Opening a panel or losing focus stops skip.
-- Menu: saves, loading/import, export, settings, gallery, fullscreen, previous choice, title.
+- Menu: saves, loading/import, quick save/load, export, settings, CG gallery, music mode, fullscreen, previous choice, title.
 
 Saves/settings are stored in browser IndexedDB, scoped to the site origin. Clearing site data removes them. Export saves before changing host/browser; exports can contain game dialogue. When IndexedDB is unavailable, the fallback is memory-only and is lost on reload. There is no cloud sync. Flowchart jumps are exploratory and do not reconstruct all route prerequisites.
+
+**Autosave** keeps one rolling snapshot as you read, so a closed tab or a refresh resumes at the last line; **Continue** on the title screen uses it when no manual save exists, and the menu offers *Resume autosave*. It is stored separately from the quick save (F5/F9) and from numbered slots, so it can never overwrite a save you made deliberately. Toggle it under Settings → Saving.
 
 ## Hosting and contributing
 

@@ -1,7 +1,34 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { GameManifest, RuntimeState } from "../types";
+import type { FlowchartEdge, FlowchartNode, GameManifest, RuntimeState } from "../types";
+import { ResolvedImage } from "../runtime/packedMedia";
+import { peekScene } from "../runtime/sceneStore";
 
-export type FlowchartArc = "all" | "dream" | "misuzu" | "kano" | "minagi" | "summer" | "air";
+/**
+ * The story chart, drawn straight from `manifest.flowchart`.
+ *
+ * Every node and edge comes from `tools/air/flowchart.ts`, which derives them
+ * from the SEEN bytecode while preparing assets: 77 story scenes, one node per
+ * `select`, one edge per scene transition, a story-date caption per scene, the
+ * first backdrop the scene paints (as a thumbnail name), and the arc each node
+ * is reachable from. Nothing here is curated: the previous hand-written tree
+ * had links that do not exist in the bytecode and missed 56 of the 86 scenes.
+ *
+ * Packed builds serve scenes lazily, and `manifest.scenes` is a Proxy whose
+ * placeholder programs have no instructions, so this file must never derive
+ * anything by reading a scene program: `date`, `label` and `thumb` already
+ * cover what the cards show, and `peekScene` (never `manifest.scenes[id]`) is
+ * only a fallback for manifests that keep real programs in memory.
+ */
+
+/** The three real story arcs plus "all"; the bytecode has no other arcs. */
+export type FlowchartArc = "all" | "dream" | "summer" | "air";
+
+const ARC_FILTERS: ReadonlyArray<{ value: FlowchartArc; label: string }> = [
+  { value: "all", label: "All Arcs" },
+  { value: "dream", label: "Dream Arc" },
+  { value: "summer", label: "Summer Arc" },
+  { value: "air", label: "AIR Arc" },
+];
 
 export interface FlowNodeData {
   id: string;
@@ -10,7 +37,7 @@ export interface FlowNodeData {
   label: string;
   dateLabel?: string;
   type: "scene" | "choice" | "ending";
-  arc: "dream" | "misuzu" | "kano" | "minagi" | "summer" | "air" | "other";
+  arc: FlowchartArc;
   options?: string[];
   thumbnailUrl?: string;
   x: number;
@@ -25,6 +52,8 @@ export interface FlowEdgeData {
   id: string;
   from: string;
   to: string;
+  /** Scene id the edge originates in, for the "explored" tint. */
+  fromSceneId: string;
   label?: string;
   fromX: number;
   fromY: number;
@@ -40,395 +69,428 @@ interface FlowchartViewProps {
   onClose?: () => void;
 }
 
-interface StoryTreeNodeDef {
+// ---- layout constants (unchanged card size; choice forks are small tabs) ----
+const CARD_WIDTH = 96;
+const CARD_HEIGHT = 64;
+/** A `select` is a fork inside a scene, so it draws as a narrow paper tab. */
+const CHIP_WIDTH = 84;
+const CHIP_HEIGHT = 19;
+const CHIP_GAP = 5;
+const CHIP_OFFSET = 8;
+const HORIZONTAL_GAP = 26;
+const VERTICAL_GAP = 46;
+const PADDING = 60;
+const MIN_ZOOM = 0.18;
+const MAX_ZOOM = 2.2;
+
+type GraphNode = {
   id: string;
   sceneId: string;
-  instruction?: number;
+  instruction: number;
   label: string;
-  dateLabel?: string;
+  date?: string;
+  arc: FlowchartArc;
   type: "scene" | "choice" | "ending";
-  arc: "dream" | "misuzu" | "kano" | "minagi" | "summer" | "air";
-  bgAlias?: string;
-  options?: string[];
-  children?: StoryTreeNodeDef[];
+  options: string[];
+  thumb?: string;
+};
+
+export type FlowchartGraph = {
+  nodes: Map<string, GraphNode>;
+  /** Spanning-tree children per node (scene -> child scenes and choice tabs). */
+  children: Map<string, string[]>;
+  /** Choice tab ids per scene, in bytecode order. */
+  choices: Map<string, string[]>;
+  /** First scene parent per node, used to unlock a path to the root. */
+  parentOf: Map<string, string>;
+  /** Every edge in the manifest graph, deduplicated by endpoints. */
+  edges: FlowchartEdge[];
+  /** Scene nodes that no other scene transitions into, in a stable order. */
+  roots: string[];
+  /** Every node in breadth-first order from the roots. */
+  order: string[];
+  sceneCount: number;
+};
+
+function arcOf(node: FlowchartNode): FlowchartArc {
+  return node.arc === "dream" || node.arc === "summer" || node.arc === "air" ? node.arc : "all";
 }
 
-const STORY_TREE_ROOT: StoryTreeNodeDef = {
-      id: "seen0170:scene",
-      sceneId: "seen0170",
-      instruction: 0,
-      label: "July 17 (Monday)",
-      dateLabel: "7/17 Prologue",
-      type: "scene",
-      arc: "dream",
-      bgAlias: "FGMZ15D",
-      children: [
-        {
-          id: "seen0180:scene",
-          sceneId: "seen0180",
-          instruction: 0,
-          label: "July 18 (Tuesday)",
-          dateLabel: "7/18 Town Arrival",
-          type: "scene",
-          arc: "dream",
-          bgAlias: "BG008",
-          children: [
-            {
-              id: "seen0180:choice:255",
-              sceneId: "seen0180",
-              instruction: 255,
-              label: "Search for puppet",
-              dateLabel: "Choice: Puppet Search",
-              type: "choice",
-              arc: "dream",
-              options: ["Find other ways", "Go look for my puppet"],
-              children: [
-                {
-                  id: "seen0180:choice:1443",
-                  sceneId: "seen0180",
-                  instruction: 1443,
-                  label: "Meet Misuzu Kamio",
-                  dateLabel: "Choice: Misuzu Encounter",
-                  type: "choice",
-                  arc: "dream",
-                  options: ["Walk away", "Run away"],
-                  children: [
-                    {
-                      id: "seen0190:scene",
-                      sceneId: "seen0190",
-                      instruction: 0,
-                      label: "July 19 (Wednesday)",
-                      dateLabel: "7/19 Sea Breeze",
-                      type: "scene",
-                      arc: "dream",
-                      bgAlias: "BG007o",
-                      children: [
-                        {
-                          id: "seen0200:scene",
-                          sceneId: "seen0200",
-                          instruction: 0,
-                          label: "July 20 (Thursday)",
-                          dateLabel: "7/20 Clinic & Beach",
-                          type: "scene",
-                          arc: "dream",
-                          bgAlias: "BG030",
-                          children: [
-                            {
-                              id: "seen0210:scene",
-                              sceneId: "seen0210",
-                              instruction: 0,
-                              label: "July 21 (Friday)",
-                              dateLabel: "7/21 Sunset Station",
-                              type: "scene",
-                              arc: "dream",
-                              bgAlias: "BG018Y",
-                              children: [
-                                {
-                                  id: "seen0220:scene",
-                                  sceneId: "seen0220",
-                                  instruction: 0,
-                                  label: "July 22 (Saturday)",
-                                  dateLabel: "7/22 Festival",
-                                  type: "scene",
-                                  arc: "dream",
-                                  bgAlias: "BG003",
-                                  children: [
-                                    {
-                                      id: "seen0230:scene",
-                                      sceneId: "seen0230",
-                                      instruction: 0,
-                                      label: "July 23 (Sunday) - Branch Point",
-                                      dateLabel: "7/23 Branch Split",
-                                      type: "choice",
-                                      arc: "dream",
-                                      options: ["Misuzu Path", "Kano Path", "Minagi Path", "Common Path"],
-                                      children: [
-                                        {
-                                          id: "seen0275:scene",
-                                          sceneId: "seen0275",
-                                          instruction: 0,
-                                          label: "July 27 (Misuzu Route)",
-                                          dateLabel: "7/27 Misuzu",
-                                          type: "scene",
-                                          arc: "misuzu",
-                                          bgAlias: "BG005",
-                                          children: [
-                                            {
-                                              id: "seen0285:scene",
-                                              sceneId: "seen0285",
-                                              instruction: 0,
-                                              label: "July 28 (Misuzu)",
-                                              dateLabel: "7/28 Misuzu",
-                                              type: "scene",
-                                              arc: "misuzu",
-                                              bgAlias: "BG006",
-                                              children: [
-                                                {
-                                                  id: "seen0295:scene",
-                                                  sceneId: "seen0295",
-                                                  instruction: 0,
-                                                  label: "July 29 (Misuzu)",
-                                                  dateLabel: "7/29 Misuzu",
-                                                  type: "scene",
-                                                  arc: "misuzu",
-                                                  bgAlias: "BG007",
-                                                  children: [
-                                                    {
-                                                      id: "seen0305:scene",
-                                                      sceneId: "seen0305",
-                                                      instruction: 0,
-                                                      label: "July 30 (Misuzu)",
-                                                      dateLabel: "7/30 Misuzu",
-                                                      type: "scene",
-                                                      arc: "misuzu",
-                                                      bgAlias: "BG008",
-                                                      children: [
-                                                        {
-                                                          id: "seen0315:scene",
-                                                          sceneId: "seen0315",
-                                                          instruction: 0,
-                                                          label: "July 31 (Misuzu Dream End)",
-                                                          dateLabel: "7/31 Misuzu End",
-                                                          type: "ending",
-                                                          arc: "misuzu",
-                                                          bgAlias: "BG007N",
-                                                        },
-                                                      ],
-                                                    },
-                                                  ],
-                                                },
-                                              ],
-                                            },
-                                          ],
-                                        },
-                                        {
-                                          id: "seen0277:scene",
-                                          sceneId: "seen0277",
-                                          instruction: 0,
-                                          label: "July 27 (Kano Route)",
-                                          dateLabel: "7/27 Kano",
-                                          type: "scene",
-                                          arc: "kano",
-                                          bgAlias: "BG030",
-                                          children: [
-                                            {
-                                              id: "seen0287:scene",
-                                              sceneId: "seen0287",
-                                              instruction: 0,
-                                              label: "July 28 (Kano)",
-                                              dateLabel: "7/28 Kano",
-                                              type: "scene",
-                                              arc: "kano",
-                                              bgAlias: "BG031",
-                                              children: [
-                                                {
-                                                  id: "seen0297:scene",
-                                                  sceneId: "seen0297",
-                                                  instruction: 0,
-                                                  label: "July 29 (Kano)",
-                                                  dateLabel: "7/29 Kano",
-                                                  type: "scene",
-                                                  arc: "kano",
-                                                  bgAlias: "BG032",
-                                                  children: [
-                                                    {
-                                                      id: "seen0317:scene",
-                                                      sceneId: "seen0317",
-                                                      instruction: 0,
-                                                      label: "July 31 (Kano)",
-                                                      dateLabel: "7/31 Kano",
-                                                      type: "scene",
-                                                      arc: "kano",
-                                                      bgAlias: "BG032",
-                                                      children: [
-                                                        {
-                                                          id: "seen0506:scene",
-                                                          sceneId: "seen0506",
-                                                          instruction: 0,
-                                                          label: "August 13 (Kano Epilogue)",
-                                                          dateLabel: "8/13 Kano End",
-                                                          type: "ending",
-                                                          arc: "kano",
-                                                          bgAlias: "BG030",
-                                                        },
-                                                      ],
-                                                    },
-                                                  ],
-                                                },
-                                              ],
-                                            },
-                                          ],
-                                        },
-                                        {
-                                          id: "seen0601:scene",
-                                          sceneId: "seen0601",
-                                          instruction: 0,
-                                          label: "August 1 (Minagi Route)",
-                                          dateLabel: "8/1 Minagi",
-                                          type: "scene",
-                                          arc: "minagi",
-                                          bgAlias: "BG018",
-                                          children: [
-                                            {
-                                              id: "seen0603:scene",
-                                              sceneId: "seen0603",
-                                              instruction: 0,
-                                              label: "August 3 (Rooftop)",
-                                              dateLabel: "8/3 Minagi",
-                                              type: "scene",
-                                              arc: "minagi",
-                                              bgAlias: "BG019",
-                                              children: [
-                                                {
-                                                  id: "seen0608:scene",
-                                                  sceneId: "seen0608",
-                                                  instruction: 0,
-                                                  label: "August 8 (Michiru)",
-                                                  dateLabel: "8/8 Michiru",
-                                                  type: "scene",
-                                                  arc: "minagi",
-                                                  bgAlias: "BG020",
-                                                  children: [
-                                                    {
-                                                      id: "seen0614:scene",
-                                                      sceneId: "seen0614",
-                                                      instruction: 0,
-                                                      label: "Minagi Epilogue",
-                                                      dateLabel: "Minagi End",
-                                                      type: "ending",
-                                                      arc: "minagi",
-                                                      bgAlias: "BG018Y",
-                                                    },
-                                                  ],
-                                                },
-                                              ],
-                                            },
-                                          ],
-                                        },
-                                        {
-                                          id: "seen0240:scene",
-                                          sceneId: "seen0240",
-                                          instruction: 0,
-                                          label: "July 24 (Common)",
-                                          dateLabel: "7/24 Common",
-                                          type: "scene",
-                                          arc: "dream",
-                                          bgAlias: "BG008",
-                                          children: [
-                                            {
-                                              id: "seen0700:scene",
-                                              sceneId: "seen0700",
-                                              instruction: 0,
-                                              label: "Summer Arc: [ Shinto Shrine ] / Ryuuya",
-                                              dateLabel: "Summer Arc",
-                                              type: "scene",
-                                              arc: "summer",
-                                              bgAlias: "BG040",
-                                              children: [
-                                                {
-                                                  id: "seen0701:scene",
-                                                  sceneId: "seen0701",
-                                                  instruction: 0,
-                                                  label: "Summer Arc: [ Mountain Path ]",
-                                                  dateLabel: "Summer 2",
-                                                  type: "scene",
-                                                  arc: "summer",
-                                                  bgAlias: "BG041",
-                                                  children: [
-                                                    {
-                                                      id: "seen0703:scene",
-                                                      sceneId: "seen0703",
-                                                      instruction: 0,
-                                                      label: "Summer Arc: [ Skydream ]",
-                                                      dateLabel: "Summer End",
-                                                      type: "ending",
-                                                      arc: "summer",
-                                                      bgAlias: "BG043",
-                                                      children: [
-                                                        {
-                                                          id: "seen0400:scene",
-                                                          sceneId: "seen0400",
-                                                          instruction: 0,
-                                                          label: "AIR Arc: August 1 / Sora",
-                                                          dateLabel: "AIR Arc (Sora)",
-                                                          type: "scene",
-                                                          arc: "air",
-                                                          bgAlias: "BG009",
-                                                          children: [
-                                                            {
-                                                              id: "seen0410:scene",
-                                                              sceneId: "seen0410",
-                                                              instruction: 0,
-                                                              label: "August 5 / Sora",
-                                                              dateLabel: "AIR 8/5",
-                                                              type: "scene",
-                                                              arc: "air",
-                                                              bgAlias: "BG008",
-                                                              children: [
-                                                                {
-                                                                  id: "seen0420:scene",
-                                                                  sceneId: "seen0420",
-                                                                  instruction: 0,
-                                                                  label: "August 8 / Sora",
-                                                                  dateLabel: "AIR 8/8",
-                                                                  type: "scene",
-                                                                  arc: "air",
-                                                                  bgAlias: "BG005",
-                                                                  children: [
-                                                                    {
-                                                                      id: "seen0440:scene",
-                                                                      sceneId: "seen0440",
-                                                                      instruction: 0,
-                                                                      label: "AIR Epilogue / Sora",
-                                                                      dateLabel: "AIR Epilogue",
-                                                                      type: "scene",
-                                                                      arc: "air",
-                                                                      bgAlias: "BG008",
-                                                                      children: [
-                                                                        {
-                                                                          id: "seen0444:scene",
-                                                                          sceneId: "seen0444",
-                                                                          instruction: 0,
-                                                                          label: "A Fresh Start (True Ending)",
-                                                                          dateLabel: "AIR True End",
-                                                                          type: "ending",
-                                                                          arc: "air",
-                                                                          bgAlias: "BG009",
-                                                                        },
-                                                                      ],
-                                                                    },
-                                                                  ],
-                                                                },
-                                                              ],
-                                                            },
-                                                          ],
-                                                        },
-                                                      ],
-                                                    },
-                                                  ],
-                                                },
-                                              ],
-                                            },
-                                          ],
-                                        },
-                                      ],
-                                    },
-                                  ],
-                                },
-                              ],
-                            },
-                          ],
-                        },
-                      ],
-                    },
-                  ],
-                },
-              ],
-            },
-          ],
-        },
-      ],
-    };
+function typeOf(node: FlowchartNode): "scene" | "choice" | "ending" {
+  if (node.kind === "choice") return "choice";
+  if (node.kind === "ending") return "ending";
+  return "scene";
+}
+
+/**
+ * Index the manifest graph: nodes by id, a spanning tree for layout, and the
+ * parent links used to reveal a path once a scene has been seen.
+ *
+ * The graph is nearly a tree, but a few scenes are reachable from more than one
+ * place (`seen0444` has three parents) and `seen0230`/`seen0232` form a loop.
+ * Layout therefore needs a spanning tree; every edge is still drawn.
+ */
+export function buildFlowchartGraph(flowchart: { nodes: FlowchartNode[]; edges: FlowchartEdge[] } | undefined): FlowchartGraph {
+  const nodes = new Map<string, GraphNode>();
+  for (const node of flowchart?.nodes ?? []) {
+    if (!node?.id) continue;
+    nodes.set(node.id, {
+      id: node.id,
+      sceneId: node.sceneId,
+      instruction: node.instruction ?? 0,
+      label: node.label || node.sceneId,
+      date: node.date,
+      arc: arcOf(node),
+      type: typeOf(node),
+      options: Array.isArray(node.options) ? node.options : [],
+      thumb: node.thumb,
+    });
+  }
+
+  const edges: FlowchartEdge[] = [];
+  const outgoing = new Map<string, string[]>();
+  const parentOf = new Map<string, string>();
+  const choiceOf = new Map<string, string[]>();
+  const seenEdge = new Set<string>();
+  for (const edge of flowchart?.edges ?? []) {
+    if (!edge?.from || !edge?.to) continue;
+    // Both endpoints must exist: a manifest may be older than the graph code.
+    if (!nodes.has(edge.from) || !nodes.has(edge.to)) continue;
+    const key = `${edge.from}\u0000${edge.to}`;
+    if (seenEdge.has(key)) continue;
+    seenEdge.add(key);
+    edges.push(edge);
+    const list = outgoing.get(edge.from) ?? [];
+    list.push(edge.to);
+    outgoing.set(edge.from, list);
+    if (!parentOf.has(edge.to)) parentOf.set(edge.to, edge.from);
+    if (nodes.get(edge.to)?.type === "choice") {
+      const chips = choiceOf.get(edge.from) ?? [];
+      chips.push(edge.to);
+      choiceOf.set(edge.from, chips);
+    }
+  }
+  // Choice tabs keep bytecode order so the option list matches the game.
+  for (const chips of choiceOf.values()) {
+    chips.sort((left, right) => (nodes.get(left)?.instruction ?? 0) - (nodes.get(right)?.instruction ?? 0));
+  }
+
+  const targets = [...outgoing.values()].flat();
+  const hasIncoming = new Set(targets);
+  const arcRank: Record<string, number> = { dream: 0, summer: 1, air: 2 };
+  const sceneIds = [...nodes.values()]
+    .filter((node) => node.type !== "choice")
+    .map((node) => node.id)
+    .sort((left, right) => {
+      const rank = (arcRank[nodes.get(left)!.arc] ?? 9) - (arcRank[nodes.get(right)!.arc] ?? 9);
+      return rank || left.localeCompare(right);
+    });
+  // Scene nodes nothing transitions into: the three story entries, in the
+  // order the title selector offers them.
+  const roots = sceneIds.filter((id) => !hasIncoming.has(id));
+
+  // Breadth-first spanning tree. Roots first, then any remaining component the
+  // roots cannot reach (the synthetic demo route is a loop with no true root).
+  const children = new Map<string, string[]>();
+  const order: string[] = [];
+  const placed = new Set<string>();
+  const grow = (start: string): void => {
+    if (placed.has(start)) return;
+    placed.add(start);
+    order.push(start);
+    const queue = [start];
+    while (queue.length) {
+      const current = queue.shift()!;
+      // Scene children first so the tree follows story flow; a scene's select
+      // tabs are appended in bytecode order.
+      const scenes = (outgoing.get(current) ?? []).filter((kid) => nodes.get(kid)?.type !== "choice");
+      const chips = choiceOf.get(current) ?? [];
+      const kids = [...scenes, ...chips].filter((kid) => !placed.has(kid));
+      for (const kid of kids) {
+        placed.add(kid);
+        order.push(kid);
+        queue.push(kid);
+      }
+      children.set(current, kids);
+    }
+  };
+  for (const root of roots) grow(root);
+  for (const id of [...sceneIds, ...choiceOf.values()].flat()) if (!placed.has(id)) grow(id);
+  for (const node of nodes.values()) if (!children.has(node.id)) children.set(node.id, []);
+
+  return {
+    nodes,
+    children,
+    choices: choiceOf,
+    parentOf,
+    edges,
+    roots,
+    order,
+    sceneCount: sceneIds.length,
+  };
+}
+
+export type FlowchartLayout = {
+  nodes: FlowNodeData[];
+  edges: FlowEdgeData[];
+  bounds: { width: number; height: number };
+  visibleSceneCount: number;
+};
+
+/**
+ * Vertical tidy-tree layout: one row per transition depth, scenes as cards,
+ * each scene's `select` forks stacked as tabs beside the card.
+ *
+ * A subtree is measured as a half-width either side of its card centre, so
+ * every card sits directly under its parent's card. A scene with fork tabs
+ * reserves the same room on both sides -- the tabs themselves stay right of the
+ * card -- which keeps its arrows clear without shifting its children. Rows are
+ * as tall as their tallest card, so a scene with 13 forks does not squeeze its
+ * neighbours.
+ */
+export function layoutFlowchart(
+  graph: FlowchartGraph,
+  isVisible: (node: GraphNode) => boolean,
+  thumbnailFor: (node: GraphNode) => string | undefined,
+): FlowchartLayout {
+  const visible = (id: string) => {
+    const node = graph.nodes.get(id);
+    return Boolean(node && isVisible(node));
+  };
+  // `children` holds both scene children and the scene's select tabs, so the
+  // layout splits them: tabs are placed beside the card, not in the tree.
+  const childrenOf = (id: string) =>
+    (graph.children.get(id) ?? []).filter((kid) => graph.nodes.get(kid)?.type !== "choice" && visible(kid));
+  const chipsOf = (id: string) => (graph.choices.get(id) ?? []).filter(visible);
+
+  const treeParent = new Map<string, string>();
+  for (const [id, kids] of graph.children) {
+    for (const kid of kids) if (!treeParent.has(kid)) treeParent.set(kid, id);
+  }
+  // A node starts its own subtree when the arc filter hides its parent.
+  const roots = graph.order.filter((id) => {
+    if (!visible(id)) return false;
+    const parent = treeParent.get(id);
+    return !parent || !visible(parent);
+  });
+  // A closed loop has no root at all (the synthetic demo route is one), so the
+  // first node becomes the top of the chart instead of everything sharing a row.
+  if (!roots.length) {
+    const first = graph.order.find(visible);
+    if (first) roots.push(first);
+  }
+
+  const depth = new Map<string, number>();
+  for (const root of roots) {
+    if (depth.has(root)) continue;
+    depth.set(root, 0);
+    const queue = [root];
+    while (queue.length) {
+      const current = queue.shift()!;
+      for (const kid of graph.children.get(current) ?? []) {
+        if (graph.nodes.get(kid)?.type === "choice" || !visible(kid) || depth.has(kid)) continue;
+        depth.set(kid, (depth.get(current) ?? 0) + 1);
+        queue.push(kid);
+      }
+    }
+  }
+
+  /**
+   * Half-width of a subtree, measured symmetrically from its card centre, so
+   * every card sits directly under its parent's card. A scene with fork tabs
+   * reserves the same room on both sides; the tabs themselves stay right of the
+   * card, which keeps a card's arrows clear without shifting its children.
+   */
+  const halfWidths = new Map<string, number>();
+  const halfWidthOf = (id: string): number => {
+    const cached = halfWidths.get(id);
+    if (cached !== undefined) return cached;
+    const node = graph.nodes.get(id);
+    if (!node) return CARD_WIDTH / 2;
+    const own = node.type === "choice"
+      ? CHIP_WIDTH / 2
+      : CARD_WIDTH / 2 + (chipsOf(id).length ? CHIP_OFFSET + CHIP_WIDTH : 0);
+    // Cycle guard: a self-referencing component measures as its own card until
+    // the real children are known.
+    halfWidths.set(id, own);
+    const kids = childrenOf(id);
+    const childrenWidth = kids.length
+      ? kids.reduce((sum, kid) => sum + halfWidthOf(kid) * 2, 0) + (kids.length - 1) * HORIZONTAL_GAP
+      : 0;
+    const half = Math.max(own, childrenWidth / 2);
+    halfWidths.set(id, half);
+    return half;
+  };
+
+  const cardHeightOf = (id: string): number => {
+    const node = graph.nodes.get(id);
+    if (!node) return CARD_HEIGHT;
+    if (node.type === "choice") return CHIP_HEIGHT;
+    const chips = chipsOf(id);
+    const stack = chips.length ? chips.length * CHIP_HEIGHT + (chips.length - 1) * CHIP_GAP : 0;
+    return Math.max(CARD_HEIGHT, stack);
+  };
+
+  const rowHeights = new Map<number, number>();
+  for (const [id, row] of depth) {
+    rowHeights.set(row, Math.max(rowHeights.get(row) ?? 0, cardHeightOf(id)));
+  }
+  const rowTops = new Map<number, number>();
+  let cursorY = PADDING;
+  for (const row of [...rowHeights.keys()].sort((left, right) => left - right)) {
+    rowTops.set(row, cursorY);
+    cursorY += rowHeights.get(row)! + VERTICAL_GAP;
+  }
+
+  const nodeList: FlowNodeData[] = [];
+  const placed = new Map<string, FlowNodeData>();
+  let minX = 0;
+  let maxX = 0;
+
+  const push = (data: FlowNodeData): void => {
+    nodeList.push(data);
+    placed.set(data.id, data);
+    minX = Math.min(minX, data.x);
+    maxX = Math.max(maxX, data.x + data.width);
+  };
+
+  const place = (id: string, anchor: number): void => {
+    if (placed.has(id)) return;
+    const node = graph.nodes.get(id)!;
+    const top = rowTops.get(depth.get(id) ?? 0) ?? PADDING;
+
+    if (node.type === "choice") {
+      push({
+        id: node.id,
+        sceneId: node.sceneId,
+        instruction: node.instruction,
+        label: node.label,
+        dateLabel: node.label,
+        type: "choice",
+        arc: node.arc,
+        options: node.options.length ? node.options : undefined,
+        x: Math.round(anchor - CHIP_WIDTH / 2),
+        y: Math.round(top),
+        width: CHIP_WIDTH,
+        height: CHIP_HEIGHT,
+        parentIds: graph.parentOf.has(id) ? [graph.parentOf.get(id)!] : [],
+      });
+      return;
+    }
+
+    const cardX = Math.round(anchor - CARD_WIDTH / 2);
+    const chips = chipsOf(id);
+    push({
+      id: node.id,
+      sceneId: node.sceneId,
+      instruction: node.instruction,
+      label: node.label,
+      dateLabel: node.date ?? node.label,
+      type: node.type,
+      arc: node.arc,
+      options: node.options.length ? node.options : undefined,
+      thumbnailUrl: thumbnailFor(node),
+      x: cardX,
+      y: Math.round(top),
+      width: CARD_WIDTH,
+      height: CARD_HEIGHT,
+      parentIds: graph.parentOf.has(id) ? [graph.parentOf.get(id)!] : [],
+      isChoiceFork: chips.length > 0,
+    });
+
+    // Choice tabs stack beside the card, so a fork never gets in the way of
+    // the scene-to-scene arrows leaving the card's bottom edge.
+    chips.forEach((chipId, index) => {
+      const chip = graph.nodes.get(chipId)!;
+      push({
+        id: chip.id,
+        sceneId: chip.sceneId,
+        instruction: chip.instruction,
+        label: chip.label,
+        dateLabel: chip.options[0] ?? chip.label,
+        type: "choice",
+        arc: chip.arc,
+        options: chip.options.length ? chip.options : undefined,
+        x: cardX + CARD_WIDTH + CHIP_OFFSET,
+        y: Math.round(top + index * (CHIP_HEIGHT + CHIP_GAP)),
+        width: CHIP_WIDTH,
+        height: CHIP_HEIGHT,
+        parentIds: [id],
+      });
+    });
+
+    const kids = childrenOf(id);
+    if (!kids.length) return;
+    const total = kids.reduce((sum, kid) => sum + halfWidthOf(kid) * 2, 0) + (kids.length - 1) * HORIZONTAL_GAP;
+    let cursor = anchor - total / 2;
+    for (const kid of kids) {
+      const half = halfWidthOf(kid);
+      place(kid, cursor + half);
+      cursor += half * 2 + HORIZONTAL_GAP;
+    }
+  };
+
+  let cursorX = PADDING;
+  for (const root of roots) {
+    if (placed.has(root)) continue;
+    const half = halfWidthOf(root);
+    place(root, cursorX + half);
+    cursorX += half * 2 + HORIZONTAL_GAP;
+  }
+  // Anything the roots cannot reach still belongs on the chart.
+  for (const id of graph.order) {
+    if (placed.has(id) || !visible(id)) continue;
+    const half = halfWidthOf(id);
+    place(id, cursorX + half);
+    cursorX += half * 2 + HORIZONTAL_GAP;
+  }
+
+  const edgeList: FlowEdgeData[] = [];
+  for (const edge of graph.edges) {
+    const from = placed.get(edge.from);
+    const to = placed.get(edge.to);
+    if (!from || !to) continue;
+    const isChoice = to.type === "choice";
+    edgeList.push({
+      id: `${edge.from}->${edge.to}`,
+      from: edge.from,
+      to: edge.to,
+      fromSceneId: from.sceneId,
+      label: edge.label,
+      // Choice forks leave the card's right edge into the tab; scene
+      // transitions leave the card's bottom edge and enter the child's top.
+      fromX: isChoice ? from.x + from.width : Math.round(from.x + from.width / 2),
+      fromY: isChoice ? Math.round(to.y + to.height / 2) : from.y + from.height,
+      toX: isChoice ? to.x : Math.round(to.x + to.width / 2),
+      toY: isChoice ? Math.round(to.y + to.height / 2) : to.y,
+      isChoice,
+    });
+  }
+
+  let maxY = 0;
+  for (const node of nodeList) maxY = Math.max(maxY, node.y + node.height);
+
+  return {
+    nodes: nodeList,
+    edges: edgeList,
+    bounds: {
+      width: Math.max(maxX - Math.min(minX, 0) + PADDING * 2, 720),
+      height: Math.max(maxY + PADDING * 2, 480),
+    },
+    visibleSceneCount: nodeList.filter((node) => node.type !== "choice").length,
+  };
+}
+
+function resolveAssetUrl(manifest: GameManifest, name: string | undefined): string | undefined {
+  if (!name) return undefined;
+  const aliasId = manifest.assetAliases?.[name.toUpperCase()];
+  if (aliasId) {
+    const asset = manifest.assets?.[aliasId];
+    if (asset) return asset.url;
+  }
+  const direct = manifest.assets?.[name];
+  return direct ? direct.url : undefined;
+}
 
 export const FlowchartView: React.FC<FlowchartViewProps> = ({
   manifest,
@@ -444,6 +506,9 @@ export const FlowchartView: React.FC<FlowchartViewProps> = ({
   const [hoveredNode, setHoveredNode] = useState<FlowNodeData | null>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
+  const didFitRef = useRef(false);
+
+  const graph = useMemo(() => buildFlowchartGraph(manifest.flowchart), [manifest.flowchart]);
 
   const visitedScenes = useMemo(() => {
     const visited = new Set<string>();
@@ -467,225 +532,93 @@ export const FlowchartView: React.FC<FlowchartViewProps> = ({
       if (item.sceneId) visited.add(item.sceneId);
     }
 
-    // Build parent map from storyTreeRoot to propagate unlocked status to all ancestors
-    const parentMap = new Map<string, string>();
-    const registerParents = (node: StoryTreeNodeDef) => {
-      if (node.children) {
-        for (const child of node.children) {
-          parentMap.set(child.sceneId, node.sceneId);
-          registerParents(child);
-        }
-      }
-    };
-    registerParents(STORY_TREE_ROOT);
-
-    // Propagate ancestors: if a descendant node is visited, all its ancestor nodes are unlocked
-    const initialVisited = Array.from(visited);
-    for (const sceneId of initialVisited) {
-      let current: string | undefined = sceneId;
-      while (current) {
-        visited.add(current);
-        current = parentMap.get(current);
+    // Reveal the path: a visited scene also marks the scenes leading to it, so
+    // the chart shows a route rather than scattered islands. The parents come
+    // from the manifest graph, not from a curated tree.
+    for (const sceneId of [...visited]) {
+      let current = graph.parentOf.get(`${sceneId}:scene`) ?? graph.parentOf.get(sceneId);
+      let guard = 0;
+      while (current && guard++ < 512) {
+        const scene = graph.nodes.get(current)?.sceneId ?? current.replace(/:scene$/, "");
+        if (visited.has(scene)) break;
+        visited.add(scene);
+        current = graph.parentOf.get(current);
       }
     }
 
     try {
-      localStorage.setItem("air_discovered_scenes", JSON.stringify(Array.from(visited)));
+      localStorage.setItem("air_discovered_scenes", JSON.stringify([...visited]));
     } catch {
       // Ignore storage errors
     }
 
     return visited;
-  }, [manifest.startScene, state.backlog, state.sceneId, state.selectionHistory]);
+  }, [graph, manifest.startScene, state.backlog, state.sceneId, state.selectionHistory]);
 
-  const resolveThumbnail = useCallback(
-    (sceneId: string, bgAlias?: string): string | undefined => {
-      if (bgAlias) {
-        const aliasId = manifest.assetAliases?.[bgAlias.toUpperCase()];
-        if (aliasId && manifest.assets[aliasId]) return manifest.assets[aliasId].url;
-        if (manifest.assets[bgAlias]) return manifest.assets[bgAlias].url;
-      }
-      const sceneThumbMap: Record<string, string> = {
-        seen0170: "FGMZ15D",
-        seen0180: "BG008",
-        seen0190: "BG007o",
-        seen0200: "BG030",
-        seen0210: "BG018Y",
-        seen0220: "BG003",
-        seen0230: "BG005",
-        seen0275: "BG005",
-        seen0285: "BG006",
-        seen0295: "BG007",
-        seen0305: "BG008",
-        seen0315: "BG007N",
-        seen0277: "BG030",
-        seen0287: "BG031",
-        seen0297: "BG032",
-        seen0307: "BG030",
-        seen0317: "BG032",
-        seen0501: "BG030",
-        seen0601: "BG018",
-        seen0603: "BG019",
-        seen0608: "BG020",
-        seen0614: "BG018Y",
-        seen0700: "BG040",
-        seen0701: "BG041",
-        seen0702: "BG042",
-        seen0703: "BG043",
-        seen0400: "BG009",
-        seen0410: "BG008",
-        seen0420: "BG005",
-        seen0430: "BG007N",
-        seen0440: "BG008",
-        seen0444: "BG009",
-      };
-
-      const thumbAlias = sceneThumbMap[sceneId];
-      if (thumbAlias) {
-        const aliasId = manifest.assetAliases?.[thumbAlias.toUpperCase()];
-        if (aliasId && manifest.assets[aliasId]) return manifest.assets[aliasId].url;
-        if (manifest.assets[thumbAlias]) return manifest.assets[thumbAlias].url;
-      }
-
-      const scene = manifest.scenes[sceneId];
+  /**
+   * Card image: the backdrop name recorded on the node while preparing. Packed
+   * builds only expose a scene program after it has been loaded, so the
+   * fallback reads `peekScene` (never `manifest.scenes[...].instructions`).
+   */
+  const thumbnailFor = useCallback(
+    (node: GraphNode): string | undefined => {
+      const recorded = resolveAssetUrl(manifest, node.thumb);
+      if (recorded) return recorded;
+      const scene = peekScene(manifest, node.sceneId);
       if (!scene) return undefined;
-      for (const inst of scene.instructions) {
-        if (inst.op === "image" && inst.asset && manifest.assets[inst.asset]) {
-          return manifest.assets[inst.asset].url;
+      for (const instruction of scene.instructions) {
+        if (instruction.op === "image" && instruction.asset) {
+          const asset = manifest.assets?.[instruction.asset];
+          if (asset) return asset.url;
         }
       }
       return undefined;
     },
-    [manifest.assetAliases, manifest.assets, manifest.scenes]
+    [manifest, manifest.assetAliases, manifest.assets],
   );
 
-
-
-  const { nodes, edges, bounds } = useMemo(() => {
-    const nodeList: FlowNodeData[] = [];
-    const edgeList: FlowEdgeData[] = [];
-
-    const CARD_WIDTH = 96;
-    const CARD_HEIGHT = 64;
-    const HORIZONTAL_GAP = 36;
-    const VERTICAL_GAP = 54;
-
-    const filterMatches = (nodeDef: StoryTreeNodeDef): boolean => {
+  const isVisible = useCallback(
+    (node: GraphNode) => {
       if (selectedArc === "all") return true;
-      if (selectedArc === "dream") return nodeDef.arc === "dream";
-      if (selectedArc === "misuzu") return nodeDef.arc === "dream" || nodeDef.arc === "misuzu";
-      if (selectedArc === "kano") return nodeDef.arc === "dream" || nodeDef.arc === "kano";
-      if (selectedArc === "minagi") return nodeDef.arc === "dream" || nodeDef.arc === "minagi";
-      if (selectedArc === "summer") return nodeDef.arc === "dream" || nodeDef.arc === "summer";
-      if (selectedArc === "air") return nodeDef.arc === "dream" || nodeDef.arc === "summer" || nodeDef.arc === "air";
-      return true;
-    };
+      // A node whose arc is unknown (a hand-written or synthetic manifest) is
+      // kept visible: hiding data the manifest cannot classify would be worse
+      // than showing one extra card.
+      if (node.arc === "all") return true;
+      // The manifest arcs are real reachability from the three story entries,
+      // and no scene transition crosses arcs, so this filter is exact.
+      return node.arc === selectedArc;
+    },
+    [selectedArc],
+  );
 
-    const calculateSubtreeWidth = (nodeDef: StoryTreeNodeDef): number => {
-      const filteredChildren = (nodeDef.children || []).filter(filterMatches);
-      if (!filteredChildren.length) return CARD_WIDTH;
-      let total = 0;
-      for (const child of filteredChildren) {
-        total += calculateSubtreeWidth(child);
-      }
-      total += (filteredChildren.length - 1) * HORIZONTAL_GAP;
-      return Math.max(CARD_WIDTH, total);
-    };
+  const { nodes, edges, bounds, visibleSceneCount } = useMemo(
+    () => layoutFlowchart(graph, isVisible, thumbnailFor),
+    [graph, isVisible, thumbnailFor],
+  );
 
-    let minX = 0;
-    let maxX = 0;
-    let maxY = 0;
+  /**
+   * Fit the chart's *width* to the window and start at the top. The chart is 29
+   * rows tall, so fitting both axes would shrink the cards into an unreadable
+   * grid; the player reads downward and scrolls as the story advances.
+   */
+  const fitToView = useCallback(() => {
+    const container = containerRef.current;
+    if (!container || !bounds.width) return;
+    const next = Math.min(1, Math.max(0.3, (container.clientWidth - 48) / bounds.width));
+    setZoom(next);
+    setPan({
+      x: Math.round((container.clientWidth - bounds.width * next) / 2),
+      y: 16,
+    });
+  }, [bounds.width]);
 
-    const layoutSubtree = (
-      nodeDef: StoryTreeNodeDef,
-      xCenter: number,
-      yTop: number,
-      parentIds: string[]
-    ): FlowNodeData => {
-      const filteredChildren = (nodeDef.children || []).filter(filterMatches);
-      const isChoiceFork = (nodeDef.options && nodeDef.options.length > 1) || filteredChildren.length > 1;
-
-      const nodeData: FlowNodeData = {
-        id: nodeDef.id,
-        sceneId: nodeDef.sceneId,
-        instruction: nodeDef.instruction ?? 0,
-        label: nodeDef.label,
-        dateLabel: nodeDef.dateLabel,
-        type: nodeDef.type,
-        arc: nodeDef.arc,
-        options: nodeDef.options,
-        thumbnailUrl: resolveThumbnail(nodeDef.sceneId, nodeDef.bgAlias),
-        x: Math.round(xCenter - CARD_WIDTH / 2),
-        y: Math.round(yTop),
-        width: CARD_WIDTH,
-        height: CARD_HEIGHT,
-        parentIds,
-        isChoiceFork,
-      };
-
-      nodeList.push(nodeData);
-
-      minX = Math.min(minX, nodeData.x);
-      maxX = Math.max(maxX, nodeData.x + CARD_WIDTH);
-      maxY = Math.max(maxY, nodeData.y + CARD_HEIGHT);
-
-      if (filteredChildren.length > 0) {
-        const totalChildrenWidth = calculateSubtreeWidth(nodeDef);
-        let currentChildX = xCenter - totalChildrenWidth / 2;
-        const childY = yTop + CARD_HEIGHT + VERTICAL_GAP;
-
-        for (let i = 0; i < filteredChildren.length; i++) {
-          const childDef = filteredChildren[i];
-          const childSubtreeWidth = calculateSubtreeWidth(childDef);
-          const childCenterX = currentChildX + childSubtreeWidth / 2;
-
-          layoutSubtree(childDef, childCenterX, childY, [nodeDef.id]);
-
-          edgeList.push({
-            id: `${nodeDef.id}->${childDef.id}`,
-            from: nodeDef.id,
-            to: childDef.id,
-            label: nodeDef.options?.[i] ?? "",
-            fromX: Math.round(xCenter),
-            fromY: Math.round(yTop + CARD_HEIGHT),
-            toX: Math.round(childCenterX),
-            toY: Math.round(childY),
-            isChoice: isChoiceFork,
-          });
-
-          currentChildX += childSubtreeWidth + HORIZONTAL_GAP;
-        }
-      }
-
-      return nodeData;
-    };
-
-    layoutSubtree(STORY_TREE_ROOT, 400, 40, []);
-
-    const padding = 60;
-    const offsetX = -minX + padding;
-    const offsetY = padding;
-
-    for (const node of nodeList) {
-      node.x += offsetX;
-      node.y += offsetY;
-    }
-    for (const edge of edgeList) {
-      edge.fromX += offsetX;
-      edge.fromY += offsetY;
-      edge.toX += offsetX;
-      edge.toY += offsetY;
-    }
-
-    return {
-      nodes: nodeList,
-      edges: edgeList,
-      bounds: {
-        width: maxX - minX + padding * 2 + 100,
-        height: maxY + padding * 2 + 100,
-      },
-    };
-  }, [resolveThumbnail, selectedArc]);
+  // A 204-node chart does not fit at 100%, so open fitted once.
+  useEffect(() => {
+    if (didFitRef.current) return;
+    if (!bounds.width) return;
+    didFitRef.current = true;
+    fitToView();
+  }, [bounds.width, fitToView]);
 
   const handleMouseDown = (event: React.MouseEvent) => {
     if ((event.target as HTMLElement).closest(".flow-card, .flow-toolbar, .flow-tabs")) return;
@@ -724,7 +657,7 @@ export const FlowchartView: React.FC<FlowchartViewProps> = ({
       if (e.ctrlKey || e.metaKey) {
         // Ctrl + Wheel: Zoom in / out
         const zoomFactor = e.deltaY < 0 ? 1.12 : 0.88;
-        setZoom((prev) => Math.min(Math.max(prev * zoomFactor, 0.35), 2.2));
+        setZoom((prev) => Math.min(Math.max(prev * zoomFactor, MIN_ZOOM), MAX_ZOOM));
       } else {
         // Normal Wheel: Pan Vertically & Horizontally (Up, Down, Left, Right)
         setPan((prev) => ({
@@ -737,36 +670,47 @@ export const FlowchartView: React.FC<FlowchartViewProps> = ({
     return () => container.removeEventListener("wheel", onNativeWheel);
   }, []);
 
-  const handleZoomIn = () => setZoom((prev) => Math.min(prev * 1.2, 2.2));
-  const handleZoomOut = () => setZoom((prev) => Math.max(prev * 0.8, 0.35));
+  const handleZoomIn = () => setZoom((prev) => Math.min(prev * 1.2, MAX_ZOOM));
+  const handleZoomOut = () => setZoom((prev) => Math.max(prev * 0.8, MIN_ZOOM));
   const handleResetView = () => {
     setZoom(1);
     setPan({ x: 0, y: 0 });
   };
 
   const handleCenterCurrent = () => {
-    const currentNode = nodes.find((n) => n.sceneId === state.sceneId);
+    const currentNode = nodes.find((n) => n.type !== "choice" && n.sceneId === state.sceneId);
     if (!currentNode || !containerRef.current) return;
     const containerWidth = containerRef.current.clientWidth;
     const containerHeight = containerRef.current.clientHeight;
-    setZoom(1);
+    const nextZoom = Math.max(zoom, 0.6);
+    setZoom(nextZoom);
     setPan({
-      x: containerWidth / 2 - currentNode.x - currentNode.width / 2,
-      y: containerHeight / 3 - currentNode.y - currentNode.height / 2,
+      x: containerWidth / 2 - (currentNode.x + currentNode.width / 2) * nextZoom,
+      y: containerHeight / 3 - (currentNode.y + currentNode.height / 2) * nextZoom,
     });
   };
 
   const handleNodeClick = (node: FlowNodeData) => {
     const isUnlocked = visitedScenes.has(node.sceneId) || node.sceneId === manifest.startScene;
     if (!isUnlocked) return;
-    if (onJumpToScene) {
-      onJumpToScene(node.sceneId, node.instruction);
+    // Choice nodes are NOT jumpable. A `select` reads its option text from
+    // string memory that only the earlier part of the scene populates, so
+    // resuming at the fork shows whatever text happens to be left over from the
+    // previous scene — mislabelled options the player can actually pick.
+    // Jumping to the scene's start replays the route up to the fork instead.
+    if (node.type === "choice") {
+      onJumpToScene?.(node.sceneId, 0);
+      return;
     }
+    onJumpToScene?.(node.sceneId, node.instruction);
   };
 
-  const discoveredCount = useMemo(() => {
-    return nodes.filter((n) => visitedScenes.has(n.sceneId) || n.sceneId === manifest.startScene).length;
-  }, [manifest.startScene, nodes, visitedScenes]);
+  const discoveredCount = useMemo(
+    () => nodes.filter((node) => node.type !== "choice" && (visitedScenes.has(node.sceneId) || node.sceneId === manifest.startScene)).length,
+    [manifest.startScene, nodes, visitedScenes],
+  );
+
+  const percent = visibleSceneCount ? Math.round((discoveredCount / visibleSceneCount) * 100) : 0;
 
   return (
     <div className="flowchart-fullscreen" role="dialog" aria-modal="true" aria-label="Story Flowchart">
@@ -774,53 +718,20 @@ export const FlowchartView: React.FC<FlowchartViewProps> = ({
         <div className="flow-title-group">
           <h2>Story Flowchart</h2>
           <span className="flow-stats">
-            {discoveredCount} / {nodes.length} Discovered ({Math.round((discoveredCount / nodes.length) * 100)}%)
+            {discoveredCount} / {visibleSceneCount} Discovered ({percent}%)
           </span>
         </div>
 
         <div className="flow-tabs">
-          <button
-            className={selectedArc === "all" ? "active" : ""}
-            onClick={() => setSelectedArc("all")}
-          >
-            All Arcs
-          </button>
-          <button
-            className={selectedArc === "dream" ? "active" : ""}
-            onClick={() => setSelectedArc("dream")}
-          >
-            Dream Arc
-          </button>
-          <button
-            className={selectedArc === "misuzu" ? "active" : ""}
-            onClick={() => setSelectedArc("misuzu")}
-          >
-            Misuzu
-          </button>
-          <button
-            className={selectedArc === "kano" ? "active" : ""}
-            onClick={() => setSelectedArc("kano")}
-          >
-            Kano
-          </button>
-          <button
-            className={selectedArc === "minagi" ? "active" : ""}
-            onClick={() => setSelectedArc("minagi")}
-          >
-            Minagi
-          </button>
-          <button
-            className={selectedArc === "summer" ? "active" : ""}
-            onClick={() => setSelectedArc("summer")}
-          >
-            Summer Arc
-          </button>
-          <button
-            className={selectedArc === "air" ? "active" : ""}
-            onClick={() => setSelectedArc("air")}
-          >
-            AIR Arc
-          </button>
+          {ARC_FILTERS.map((filter) => (
+            <button
+              key={filter.value}
+              className={selectedArc === filter.value ? "active" : ""}
+              onClick={() => setSelectedArc(filter.value)}
+            >
+              {filter.label}
+            </button>
+          ))}
         </div>
 
         {onClose && (
@@ -859,10 +770,11 @@ export const FlowchartView: React.FC<FlowchartViewProps> = ({
             </defs>
 
             {edges.map((edge) => {
-              const isTraversed =
-                visitedScenes.has(edge.from.split(":")[0]) && visitedScenes.has(edge.to.split(":")[0]);
+              const isTraversed = visitedScenes.has(edge.fromSceneId);
               const yMid = Math.round(edge.fromY + (edge.toY - edge.fromY) / 2);
-              const pathD = `M ${edge.fromX} ${edge.fromY} V ${yMid} H ${edge.toX} V ${edge.toY}`;
+              const pathD = edge.isChoice
+                ? `M ${edge.fromX} ${edge.fromY} h ${CHIP_OFFSET / 2} V ${edge.toY} H ${edge.toX}`
+                : `M ${edge.fromX} ${edge.fromY} V ${yMid} H ${edge.toX} V ${edge.toY}`;
 
               return (
                 <g key={edge.id} className="flow-edge-group">
@@ -873,7 +785,7 @@ export const FlowchartView: React.FC<FlowchartViewProps> = ({
                     strokeWidth={isTraversed ? 2.5 : 1.8}
                     fill="none"
                   />
-                  {edge.label && isTraversed && (
+                  {edge.label && !edge.isChoice && isTraversed && (
                     <text
                       x={edge.toX}
                       y={yMid - 6}
@@ -890,7 +802,8 @@ export const FlowchartView: React.FC<FlowchartViewProps> = ({
 
           {nodes.map((node) => {
             const isUnlocked = visitedScenes.has(node.sceneId) || node.sceneId === manifest.startScene;
-            const isActive = node.sceneId === state.sceneId;
+            const isActive = node.type !== "choice" && node.sceneId === state.sceneId;
+            const isChoice = node.type === "choice";
 
             return (
               <div
@@ -904,6 +817,7 @@ export const FlowchartView: React.FC<FlowchartViewProps> = ({
                   width: node.width,
                   height: node.height,
                 }}
+                title={isChoice && node.options ? node.options.join(" / ") : undefined}
                 onClick={() => handleNodeClick(node)}
                 onMouseEnter={() => setHoveredNode(node)}
                 onMouseLeave={() => setHoveredNode(null)}
@@ -916,25 +830,32 @@ export const FlowchartView: React.FC<FlowchartViewProps> = ({
 
                 <div className="flow-card">
                   {isUnlocked ? (
-                    <>
-                      {node.thumbnailUrl ? (
-                        <img
-                          className="flow-card-img"
-                          src={node.thumbnailUrl}
-                          alt={node.label}
-                          loading="lazy"
-                        />
-                      ) : (
-                        <div className="flow-card-placeholder-bg" />
-                      )}
+                    isChoice ? (
                       <div className="flow-card-badge">
-                        <span>{node.dateLabel ?? node.label}</span>
+                        <span>{node.options?.[0] ?? "Choice"}</span>
+                        {(node.options?.length ?? 0) > 1 ? <span>{` +${node.options!.length - 1}`}</span> : null}
                       </div>
-                      {node.type === "ending" && <div className="flow-ending-star">★</div>}
-                    </>
+                    ) : (
+                      <>
+                        {node.thumbnailUrl ? (
+                          <ResolvedImage
+                            className="flow-card-img"
+                            url={node.thumbnailUrl}
+                            alt={node.label}
+                            loading="lazy"
+                          />
+                        ) : (
+                          <div className="flow-card-placeholder-bg" />
+                        )}
+                        <div className="flow-card-badge">
+                          <span>{node.dateLabel ?? node.label}</span>
+                        </div>
+                        {node.type === "ending" && <div className="flow-ending-star">★</div>}
+                      </>
+                    )
                   ) : (
                     <div className="flow-card-locked-body">
-                      <svg className="flow-locked-x" viewBox="0 0 100 70">
+                      <svg className="flow-locked-x" viewBox="0 0 100 70" preserveAspectRatio="none">
                         <line x1="0" y1="0" x2="100" y2="70" stroke="rgba(255,255,255,0.12)" strokeWidth="1.5" />
                         <line x1="100" y1="0" x2="0" y2="70" stroke="rgba(255,255,255,0.12)" strokeWidth="1.5" />
                         <rect x="1" y="1" width="98" height="68" rx="6" fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth="1" />
@@ -958,6 +879,9 @@ export const FlowchartView: React.FC<FlowchartViewProps> = ({
         <button onClick={handleResetView} title="Reset View (100%)">
           100%
         </button>
+        <button onClick={fitToView} title="Fit Chart to Window">
+          Fit
+        </button>
         <button onClick={handleCenterCurrent} title="Center Current Scene">
           📍 Center
         </button>
@@ -967,12 +891,16 @@ export const FlowchartView: React.FC<FlowchartViewProps> = ({
         <div className="flow-tooltip">
           <strong>{hoveredNode.label}</strong>
           <small>
-            Scene: {hoveredNode.sceneId} · {visitedScenes.has(hoveredNode.sceneId) ? "✓ Discovered (Click to jump)" : "🔒 Undiscovered"}
+            Scene: {hoveredNode.sceneId}
+            {hoveredNode.type === "choice" ? ` · instruction ${hoveredNode.instruction}` : ""}
+            {hoveredNode.type === "ending" ? " · ending" : ""}
+            {" · "}
+            {visitedScenes.has(hoveredNode.sceneId) ? "✓ Discovered (Click to jump)" : "🔒 Undiscovered"}
           </small>
           {hoveredNode.options && hoveredNode.options.length > 0 && (
             <div className="flow-tooltip-options">
               {hoveredNode.options.map((opt, i) => (
-                <div key={i}>• {opt}</div>
+                <div key={i}>• {opt || "(unresolved)"}</div>
               ))}
             </div>
           )}

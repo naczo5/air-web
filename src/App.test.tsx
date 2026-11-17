@@ -23,6 +23,8 @@ vi.mock("./runtime/storage", async (importOriginal) => {
     saveSlot: vi.fn(async () => {}),
     unlockAsset: vi.fn(async () => {}),
     listUnlockedAssets: vi.fn(async () => []),
+    saveQuickSlot: vi.fn(async () => {}),
+    loadQuickSlot: vi.fn(async () => undefined),
   };
 });
 
@@ -253,5 +255,169 @@ describe("App gameplay", () => {
     expect(container.querySelector('[role="alert"]')?.textContent).toContain("Game manifest unavailable");
     expect(button("Retry")).toBeDefined();
     expect(container.textContent).not.toContain("Loading AIR…");
+  });
+});
+
+describe("in-idiom quality of life", () => {
+  it("opens the menu from a right click on the stage and closes it again", async () => {
+    await mount();
+    await click(button("New Game"));
+    await act(async () => {
+      stage().closest(".player")!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+    });
+    expect(container.querySelector(".panel h2")?.textContent).toBe("Menu");
+    await act(async () => {
+      stage().closest(".player")!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+    });
+    expect(container.querySelector(".panel")).toBeNull();
+  });
+
+  it("quick saves and quick loads from the menu and the keyboard", async () => {
+    vi.useFakeTimers();
+    const runtime = new AirRuntimeImpl(manifest);
+    await runtime.advance();
+    const snapshot: storage.SaveSlot = { version: 1, slot: 0, title: "Quick", timestamp: new Date().toISOString(), state: runtime.save() };
+    await mount();
+    await click(button("New Game"));
+    await click(button("Menu"));
+    await click(button("Quick save (F5)"));
+    expect(storage.saveQuickSlot).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(storage.saveQuickSlot).mock.calls[0][0].slot).toBe(0);
+    expect(container.querySelector(".toast")?.textContent).toBe("Quick saved");
+
+    vi.mocked(storage.loadQuickSlot).mockResolvedValue(snapshot);
+    await click(button("Menu"));
+    await click(button("Quick load (F9)"));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    await click(button("History"));
+    expect(history().length).toBeGreaterThan(0);
+  });
+
+  it("reports a friendly notice when no quick save exists", async () => {
+    await mount();
+    await click(button("New Game"));
+    await click(button("Menu"));
+    await click(button("Quick load (F9)"));
+    await act(async () => {});
+    expect(container.querySelector(".toast")?.textContent).toBe("No quick save yet");
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("applies the window opacity and date-caption settings", async () => {
+    vi.mocked(storage.loadSettings).mockResolvedValue({ ...storage.defaultSettings, windowOpacity: 0.62, showDateCaption: false });
+    await mount();
+    await click(button("New Game"));
+    const shell = container.querySelector(".app-shell") as HTMLElement;
+    expect(shell.style.getPropertyValue("--window-opacity")).toBe("0.62");
+    // The synthetic test scene has no date caption, so opt back in and confirm
+    // the caption gate is driven by the setting rather than the scene.
+    expect(container.querySelector(".stage-date")).toBeNull();
+  });
+
+  /**
+   * Object 83 is the original's own date display. Once the canvas draws it the
+   * DOM caption must step aside, otherwise the same date is printed twice in
+   * the top-left corner. The setting governs both.
+   */
+  it("labels the stage with the date only while the badge is drawn", async () => {
+    // The plate is canvas, so assistive technology cannot see it. The stage's
+    // accessible name carries the date instead, and only when the plate is on
+    // screen: on the prologue's first lines the engine has not opened its date
+    // window, and `seen0163` keeps it off entirely.
+    const dated: GameManifest = {
+      ...manifest,
+      scenes: {
+        test: {
+          id: "test",
+          title: "July 17 (Monday)",
+          instructions: [
+            { op: "text", text: "Before the window opens" },
+            { op: "command", offset: 0, moduleType: 1, module: 60, opcode: 1, argc: 1, overload: 0, args: [{ kind: "expression", value: { kind: "int", value: 83 } }] },
+            { op: "command", offset: 0, moduleType: 1, module: 72, opcode: 1000, argc: 3, overload: 1, args: [
+              { kind: "expression", value: { kind: "int", value: 83 } },
+              { kind: "string", value: "SDT0717" },
+              { kind: "expression", value: { kind: "int", value: 1 } },
+            ] },
+            { op: "command", offset: 0, moduleType: 1, module: 82, opcode: 1000, argc: 3, overload: 0, args: [
+              { kind: "expression", value: { kind: "int", value: 83 } },
+              { kind: "expression", value: { kind: "int", value: 16 } },
+              { kind: "expression", value: { kind: "int", value: 16 } },
+            ] },
+            { op: "text", text: "Dated line" },
+            { op: "end" },
+          ],
+        },
+      },
+      assets: { "image:G00_SDT0717.g00": { id: "image:G00_SDT0717.g00", kind: "image", url: "/images/G00__SDT0717.png", width: 150, height: 154 } },
+      assetAliases: { SDT0717: "image:G00_SDT0717.g00" },
+    };
+    vi.mocked(loadManifest).mockResolvedValue(structuredClone(dated));
+    await mount();
+    await click(button("New Game"));
+    // No plate yet: no date anywhere, and no text caption standing in.
+    expect(stage().getAttribute("aria-label")).toBe("AIR game stage");
+    expect(container.querySelector(".stage-date")).toBeNull();
+
+    await click(stage());
+    await click(stage());
+    // Plate drawn: it is announced from the plate's own name, still not as text.
+    expect(stage().getAttribute("aria-label")).toBe("AIR game stage — July 17");
+    expect(container.querySelector(".stage-date")).toBeNull();
+
+    // Turning the caption off removes the plate, so the label drops the date.
+    await openSettings();
+    const toggle = container.querySelector<HTMLInputElement>('.checkbox-row input[type="checkbox"]')!;
+    expect(toggle.checked).toBe(true);
+    await click(toggle);
+    await click(button("×"));
+    expect(persisted.showDateCaption).toBe(false);
+    expect(stage().getAttribute("aria-label")).toBe("AIR game stage");
+  });
+
+  it("never renders a text date caption in the corner the plate occupies", async () => {
+    const dated: GameManifest = {
+      ...manifest,
+      scenes: { test: { id: "test", title: "July 17 (Monday)", instructions: [{ op: "text", text: "No plate here" }, { op: "end" }] } },
+    };
+    vi.mocked(loadManifest).mockResolvedValue(structuredClone(dated));
+    await mount();
+    await click(button("New Game"));
+    // A dated title alone must not produce a text date: without a plate there is
+    // no date, exactly as in the original's title/menu/OP programs.
+    expect(container.querySelector(".stage-date")).toBeNull();
+    expect(stage().getAttribute("aria-label")).toBe("AIR game stage");
+  });
+
+  it("exposes a dedicated music mode populated from manifest audio", async () => {
+    const withAudio: GameManifest = {
+      ...manifest,
+      assets: {
+        "audio:BGM_BGM02.nwa": { id: "audio:BGM_BGM02.nwa", kind: "audio", url: "/bgm02.wav", source: "BGM/BGM02.nwa", durationMs: 62489 },
+      },
+    };
+    vi.mocked(loadManifest).mockResolvedValue(structuredClone(withAudio));
+    await mount();
+    await click(button("New Game"));
+    await click(button("Menu"));
+    await click(button("Music Mode"));
+    expect(container.querySelector(".panel h2")?.textContent).toBe("Music");
+    expect([...container.querySelectorAll(".music-gallery button")].map((item) => item.textContent)).toEqual(["BGM 02 · unheard1:02"]);
+  });
+
+  it("shows gallery pages and a percentage instead of a flat asset list", async () => {
+    const withCg: GameManifest = {
+      ...manifest,
+      galleryAssets: ["image:G00_FGMZ01.g00"],
+      assets: { "image:G00_FGMZ01.g00": { id: "image:G00_FGMZ01.g00", kind: "image", url: "/cg.png", source: "G00/FGMZ01.g00" } },
+    };
+    vi.mocked(loadManifest).mockResolvedValue(structuredClone(withCg));
+    vi.mocked(storage.listUnlockedAssets).mockResolvedValue(["image:G00_FGMZ01.g00"]);
+    await mount();
+    await click(button("New Game"));
+    await click(button("Menu"));
+    await click(button("CG Gallery"));
+    expect(container.querySelector(".gallery-percent")?.textContent).toBe("100%");
+    expect([...container.querySelectorAll(".gallery-pages button")].map((item) => item.textContent)).toEqual(["Series Z1/1"]);
+    expect(container.querySelectorAll(".gallery-grid img")).toHaveLength(1);
   });
 });

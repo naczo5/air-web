@@ -83,12 +83,31 @@ export type FlowchartNode = {
   sceneId: string;
   instruction: number;
   label: string;
+  /** Story date caption from the scene title, e.g. "July 17 (Monday)". */
+  date?: string;
+  /** Which story entry reaches this node, used for the arc filter. */
+  arc?: string;
+  kind?: "scene" | "choice" | "ending";
+  /** For choice nodes: the option labels, in child order. */
+  options?: string[];
+  /**
+   * Graphic name (resolved through `assetAliases`) of the first backdrop the
+   * scene paints. Recorded while preparing so the chart never has to read a
+   * scene program, which lazy packed builds do not have in memory.
+   */
+  thumb?: string;
 };
 
 export type FlowchartEdge = {
   from: string;
   to: string;
   label?: string;
+  /**
+   * Where the transition happens inside `from`. Choice edges point at the
+   * choice node; scene exits record the instruction that performs the jump.
+   */
+  instruction?: number;
+  option?: number;
 };
 
 export type FlowchartManifest = {
@@ -121,6 +140,44 @@ export type LayerState = {
   alpha: number;
 };
 
+/**
+ * One entry of RealLive's on-screen object table.
+ *
+ * AIR drives this layer instead of the graphics-buffer stack for anything that
+ * floats over the scene: the date plate (object 83), the two message-window
+ * bars (81/82) and the menu/OP animation slots (0-70). `1:60:1` creates an
+ * object, `1:72:1000` assigns its graphic, `1:72:1101`/`1:81:1034` its
+ * rectangle, `1:82:1000`/`1:81:1000` its position, `1:81:1004`/`1:82:1004` its
+ * visibility and `1:82:1016` its colour and alpha.
+ *
+ * `asset` is an already-resolved manifest asset id, never a URL: packed builds
+ * serve object graphics as byte ranges through `AssetLoader`.
+ */
+export type StageObject = {
+  asset?: string;
+  x: number;
+  y: number;
+  /** Rectangle from `1:72:1101`/`1:81:1034`; absent means the graphic's natural size. */
+  width?: number;
+  height?: number;
+  visible: boolean;
+  /** 0-1, from the alpha byte of `1:82:1016`. */
+  alpha: number;
+  /** Solid fill for objects that carry no graphic (the 81/82 window bars). */
+  fill?: { r: number; g: number; b: number };
+  /** `1:81:1003` label text. Recorded for save fidelity; the DOM owns text. */
+  text?: string;
+  /** `1:81:1039`/`1:82:1039` animation state. Non-zero means engine-animated. */
+  animState?: number;
+  /**
+   * True when the graphic was attached by `1:71:1000` (a file-backed animation
+   * slot) rather than `1:72:1000` (a direct `ObjSet`). Only the menu and OP
+   * programs use the file form, and they place those slots with tween/keyframe
+   * commands this port does not implement.
+   */
+  fromFile?: boolean;
+};
+
 export type AudioState = {
   music?: string;
   musicLoop?: boolean;
@@ -150,6 +207,11 @@ export type RuntimeState = {
   textBuffer: string;
   graphicsBuffers: Record<string, string>;
   viewedAssets: string[];
+  /**
+   * RealLive object table keyed by object id. Composites above the scene
+   * layers; see `StageObject` for the opcodes that maintain it.
+   */
+  objects: Record<string, StageObject>;
   selectionHistory: RuntimeCheckpoint[];
   layers: LayerState[];
   audio: AudioState;
@@ -167,6 +229,11 @@ export type RuntimeEvent =
   | { type: "text"; entry: BacklogEntry }
   | { type: "choice"; options: string[] }
   | { type: "diagnostic"; diagnostic: RuntimeDiagnostic }
+  /**
+   * Assets the next few instructions will need. The UI warms them so a slow
+   * link fetches during the current line instead of after it.
+   */
+  | { type: "prefetch"; images: string[]; audio: string[] }
   | { type: "ended" };
 
 export type RuntimeDiagnostic = {

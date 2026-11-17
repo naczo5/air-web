@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "prepare:air": "tsx tools/air/prepare.ts",
+    "pack:air": "tsx tools/air/pack.ts",
+    "pack:air:check": "tsx tools/air/pack.ts --check",
     "dev": "vite",
     "build": "vite build --mode demo",
     "preview": "vite preview",
@@ -18,7 +20,16 @@
     "release:source": "node tools/release/source.mjs",
     "release:check": "node tools/release/check.mjs",
     "test:e2e": "node tools/release/browser-test.mjs",
-    "test:e2e:game": "node tools/release/browser-test.mjs --game"
+    "test:e2e:game": "node tools/release/browser-test.mjs --game",
+    "test:pack": "node tools/release/packed-smoke.mjs",
+    "sweep:air": "tsx tools/air/sweep.ts",
+    "test:routes": "node tools/release/routes-smoke.mjs",
+    "test:routes:all": "tsx tools/air/routes.ts",
+    "test:a11y": "node tools/release/a11y-smoke.mjs",
+    "test:browsers": "node tools/release/cross-browser-smoke.mjs",
+    "build:player": "AIR_PLAYER_ONLY=1 vite build --mode game",
+    "reach:air": "tsx tools/air/reachability.ts",
+    "test:endings": "tsx tools/air/endings.ts"
   },
   "dependencies": {
     "@vitejs/plugin-react": "6.0.4",

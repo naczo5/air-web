@@ -25,7 +25,14 @@ describe("RealLive SEEN bytecode container", () => {
     expect(entry).toBeDefined();
     const decoded = decompressRealLiveScene(readSeenEntry(archive, entry!));
     const texts = extractRealLiveTexts(decoded.data, decoded.header);
-    expect(texts.some((item) => item.text.includes("When I woke up"))).toBe(true);
+    // Assert shape and encoding, not story content: expectations must not
+    // embed dialogue from the game.
+    expect(texts.length).toBeGreaterThan(0);
+    for (const item of texts.slice(0, 20)) {
+      expect(typeof item.text).toBe("string");
+      expect(item.text.length).toBeGreaterThan(0);
+      expect(item.text).not.toContain("\u0000");
+    }
   });
 
   it.skipIf(!fs.existsSync("AIR_SE/SEEN.txt"))("follows AIR's title bootstrap to the fresh-install story scene", () => {

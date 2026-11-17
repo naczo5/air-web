@@ -20,4 +20,17 @@ try {
     if ((await fs.stat(path.join(dist, "assets", name))).size > 2 * 1024 * 1024) throw new Error(`Oversized demo bundle: ${name}`);
   }
 } catch (error) { if (error.code !== "ENOENT") throw error; }
+
+// Game builds and packed deployments must never be tracked, even if their
+// paths sit under an allowlisted root.
+const untrackedRequired = ["dist-pack", "dist-game", "hosting", "AIR_SE", ".air-web-assets"];
+const trackedList = tracked ? tracked.split("\0").filter(Boolean) : [];
+for (const prefix of untrackedRequired) {
+  const offender = trackedList.find((file) => file === prefix || file.startsWith(`${prefix}/`));
+  if (offender) throw new Error(`Private/generated path is tracked by Git: ${offender}. Remove it from the index.`);
+}
+for (const prefix of ["dist-pack/", "dist-pack-"]) {
+  const offender = trackedList.find((file) => file.startsWith(prefix));
+  if (offender) throw new Error(`Packed deployment is tracked by Git: ${offender}. Remove it from the index.`);
+}
 console.log(`PASS: ${files.length} allowlisted source files; Git tracked-file and demo-output checks passed where present.`);

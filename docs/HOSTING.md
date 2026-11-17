@@ -22,9 +22,34 @@ A volunteer can clone the source and build with their own compatible data, or re
 4. Deploy only `dist-game/` to an HTTPS static host. For a subpath, use `npm run build:game -- --base /air/` and serve `/air/`.
 5. Test New Game, actual text advancement, choices, audio, and save/reload at the final URL.
 
-The host must support **HTTP byte-range requests** for seeking audio. Serve `.json` as `application/json`, `.wasm` if ever added with its proper MIME, `.ogg` as `audio/ogg`, `.wav` as `audio/wav`, and `.webmanifest` as `application/manifest+json`. Enable Brotli/gzip for JS/CSS/JSON: the manifest is about 128 MB uncompressed in the tested dataset. Provide enough bandwidth and storage for ~1.7 GB of media plus the manifest; this is unsuitable for hosts with small single-file quotas. No CDN, remote asset URL, or account is required. A separate asset origin would need additional CORS/configuration not currently supplied.
+The host must support **HTTP byte-range requests** for seeking audio and for packed assets. Serve `.json` as `application/json`, `.wasm` if ever added with its proper MIME, `.ogg` as `audio/ogg`, `.wav` as `audio/wav`, and `.webmanifest` as `application/manifest+json`. Enable Brotli/gzip for JS/CSS/JSON. The unpacked story manifest is about 128 MB in the tested dataset; the packed layout below avoids downloading it at startup.
 
-Use short/no-cache policies for `index.html`, `manifest.json`, and `sw.js`; immutable caching is suitable for hashed Vite bundles. Media names are not content-hashed, so invalidate cached media when replacing datasets. Replace deployments consistently to avoid mixing manifests and assets from different versions. Check your hosting plan's limits before uploading.
+### Packed deployment (recommended)
+
+Instead of publishing the 1.7 GB per-file tree, pack it into range-addressable archives:
+
+```sh
+npm run pack:air
+npm run pack:air:check
+```
+
+`dist-pack/` contains a small bootstrap manifest, a gzipped manifest index, one gzipped JSON file per scene, image/voice archives, and the 42 large WAVs as individual streamed objects. The tested dataset becomes **537 objects / ~1.55 GiB** (from 26,170 objects / ~1.66 GiB): 390 archives, 96 scenes, 42 WAVs, 3 index/bootstrap files and 5 player-shell files. The first load fetches about **0.6 MB** instead of 128 MB. Archive names include a content hash.
+
+Because the shell is part of the deployment, a rebuild must not accumulate old bundles: `pack:air --with-player` replaces `assets/` rather than merging into it, and `npm run build:player` skips the 1.6 GB media copy that the packed layout does not need.
+
+Packed asset URLs look like `pack/<archive>#<start>-<end>:<codec>`. The player requests `Range: bytes=start-(end-1)`, validates a `206 Partial Content` and the byte count, and falls back to one full-chunk fetch if a host ignores `Range`. A host that ignores ranges still works, but a voice line may download a 2 MB chunk.
+
+Upload rules:
+
+- Set `Content-Type` per extension: `application/json`, `application/gzip` for `.json.gz`, `application/octet-stream` for `.pack`, `audio/wav`, `image/png`, `audio/ogg`.
+- Use `Cache-Control: public, max-age=31536000, immutable` for hashed pack/scene/index names and `audio/` WAVs; use a short cache (`max-age=60`) for the stable `manifest.json` bootstrap.
+- Do not set `Content-Encoding: gzip` on `.json.gz`; the player detects and decompresses gzip itself. (A host that adds the header also works.)
+- If the assets are on a different origin, allow `Range` in CORS and expose `Content-Range`, `Content-Length`, and `Accept-Ranges`.
+- Do not upload `report.json`, `.air-pack-output`, `.env`, `AIR_SE/`, or `.air-web-assets/`.
+
+To assemble the player, run `npm run build:player` (a shell-only game build, ~2 s, no media copied) and then `npm run pack:air -- --with-player dist-game`. The packer copies only `index.html`, `assets/`, `manifest.webmanifest` and `sw.js`, and replaces those entries rather than merging, so stale hashed bundles cannot pile up. Never copy `dist-game/manifest.json` over the packed bootstrap.
+
+The legacy `dist-game/` layout, which copies every media file individually, still works (`npm run build:game`).  Its media names are not content-hashed, so invalidate cached media when replacing datasets. Replace deployments consistently to avoid mixing manifests and assets from different versions. Check your hosting plan's limits before uploading.
 
 The old cache-everything service worker is retired. `public/sw.js` only removes the project's legacy caches and unregisters itself. **Offline playback is not supported.** Do not restore the old worker from `.air-web-assets/`.
 

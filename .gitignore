@@ -6,6 +6,13 @@ dist-game/
 /release/
 asset-report.json
 manifest.json
+
+# Packed deployment, private hosting notes, and staging directories.
+dist-pack/
+dist-pack-*/
+pack-staging/
+*.pack
+hosting/
 *.g00
 *.pdt
 *.nwa
@@ -27,3 +34,29 @@ test-results/
 coverage/
 .DS_Store
 Thumbs.db
+
+# Screenshots, captures and archives of a running build are private too: they
+# contain original art. No images are committed by this project, with one
+# documented exception (see README "Preview"): a single promotional screenshot
+# used by the README. It is never loaded by the engine and is not a runtime
+# asset.
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+# Exception: the one README preview (a single promotional screenshot, never
+# loaded by the engine and not a runtime asset). See README "Preview".
+!docs/preview.webp
+*.bmp
+*.har
+*.zip
+*.7z
+report.json
+.air-pack-output
+checksums.sha256
+
+# Local agent tooling. Not project source: not in the release allowlist, not
+# referenced by CI, and specific to how the maintainer's editor is configured.
+.agents/
+skills-lock.json
